@@ -1,6 +1,7 @@
 import csv
 import logging
 import sys
+from datetime import timedelta
 from pathlib import Path
 from typing import Tuple, List
 
@@ -26,7 +27,7 @@ TIMESTAMP = "Timestamp"
 MOUSE_EVENT = "MouseEvent"
 GSR_RAW = "GSR RAW (no units) (Shimmer)"
 GSR_KILOHMS = "GSR CAL (kOhms) (Shimmer)"
-GSR_MICROSIEMENS = "GSR CAL (ÂµSiemens) (Shimmer)"
+GSR_MICROSIEMENS = "GSR CAL (µSiemens) (Shimmer)"
 KEY_CODE = "KeyCode"
 
 # Analysis column names
@@ -196,32 +197,61 @@ def plot_eda_data(stimulus: str, participant: str, stimulus_data: pd.DataFrame) 
     :return: the resulting figure
     """
 
-    # Setup figure
+    # SETUP FIGURE
     fig_eda, ax_eda = plt.subplots(4, 1, figsize=(12, 12))
     fig_eda.suptitle(f'{stimulus}: {participant}')
     fig_eda.canvas.set_window_title("EDA Analysis")
-    gsr_inverse_plot = ax_eda[0]
-    gsr_range_corrected_plot = ax_eda[1]
-    gsr_range_corrected_mean_plot = ax_eda[2]
-    gsr_peaks_plot = ax_eda[3]
+    gsr_inverse_plot = ax_eda[0]                                        # plot for inverse GSR line plot
+    gsr_range_corrected_plot = ax_eda[1]                                # plot for range corrected line plot
+    gsr_range_corrected_mean_plot_real = ax_eda[2]                      # plot for range corrected over 30min bar plot
+    gsr_range_corrected_mean_plot = ax_eda[3]                           # plot for range corrected over 2min bar plot
+    # gsr_peaks_plot = ax_eda[3]                                        # plot for GSR peaks bar plot
+    # gsr_max_min_plot = ax_eda[1]                                      # plot for max and min bar plot
 
-    # Quick analysis
-    gsr_us = stimulus_data[GSR_MICROSIEMENS]
+    # QUICK ANALYSIS
+    gsr_us = stimulus_data[GSR_MICROSIEMENS]                            # get the GSR Microsiemens column (Series)
+
+    # PROCESS 2MIN SEGMENTS RC EDA
+    gsr_two_min = gsr_us.copy()                                         # create a copy for same length and type
+    total_time = gsr_us.index[len(gsr_us)-1] - gsr_us.index[0]          # get total_time for the session
+    seg_time = total_time / 15                                          # amount of time for each segment
+    curr_time = gsr_us.index[0]                                         # start at the first time stamp
+    segments = 0
+    while segments < 15:
+        segments = segments + 1
+        new_time = curr_time + seg_time                                 # new_time is the other edge of the range
+        if segments == 15:                                              # if last segment, include the last point
+            new_time = new_time + timedelta(seconds=1)
+        two_min_seg = gsr_us[curr_time:new_time]                        # slice the data
+        # perform the calculation and assign the slice
+        range_corrected_two_min_seg = (two_min_seg - two_min_seg.max()).abs() / abs(two_min_seg.max() - two_min_seg.min())
+        gsr_two_min[curr_time:new_time] = range_corrected_two_min_seg
+        curr_time = new_time                                            # make curr_time the new_time and continue
+    # ---
+
+    # CALCULATE 30MIN RC EDA
     range_corrected_eda = (gsr_us - gsr_us.max()).abs() / abs(gsr_us.max() - gsr_us.min())
+
+    # CALCULATE PEAKS
     indices = find_peaks(range_corrected_eda)[0]
     peaks = [0] * len(range_corrected_eda)
     for index in indices:
         peaks[index] = 1
+
+    # ASSIGN COLUMNS TO STIMULUS DATA
     stimulus_data = stimulus_data.assign(
         range_corrected_eda=range_corrected_eda,
-        peaks=peaks
+        peaks=peaks,
+        gsr_two_min=gsr_two_min
     )
 
-    # Plot
+    # CALL PLOTTING FUNCTIONS
     generate_gsr_inverse_plot(gsr_inverse_plot, stimulus_data)
     generate_gsr_range_corrected_plot(gsr_range_corrected_plot, stimulus_data)
-    generate_gsr_range_correct_means_plot(gsr_range_corrected_mean_plot, stimulus_data)
-    generate_gsr_peaks_plot(gsr_peaks_plot, stimulus_data)
+    generate_gsr_range_correct_means_plot_thirty_min(gsr_range_corrected_mean_plot_real, stimulus_data)
+    generate_gsr_range_correct_means_plot_two_min(gsr_range_corrected_mean_plot, stimulus_data)
+    # generate_gsr_peaks_plot(gsr_peaks_plot, stimulus_data)
+    # generate_gsr_max_min_plot(gsr_max_min_plot, stimulus_data)
 
     return fig_eda
 
@@ -280,7 +310,7 @@ def plot_eye_gaze_data(stimulus: str, participant: str, stimulus_data: pd.DataFr
     return fig_fixation
 
 
-def generate_gsr_range_correct_means_plot(axes: plt.Axes, stimulus_data: pd.DataFrame):
+def generate_gsr_range_correct_means_plot_thirty_min(axes: plt.Axes, stimulus_data: pd.DataFrame):
     """
     Plots range corrected means over two minute windows.
 
@@ -293,12 +323,56 @@ def generate_gsr_range_correct_means_plot(axes: plt.Axes, stimulus_data: pd.Data
     windowed_data = stimulus_data.resample("2min").mean()[:15]
     time = convert_date_to_time(windowed_data.index)
 
-    axes.set_title("Range-Corrected GSR Means Over Two-Minute Windows")
+    axes.set_title("Range-Corrected GSR Means Over Two-Minute Windows (Range Correct on Thirty-Min)")
     axes.set_xlabel("Time (minutes)", fontsize="large")
     axes.set_ylabel("Range-Corrected GSR (dimensionless)")
     axes.set_ylim(0, 1)
     set_windowed_x_axis(axes)
     axes.bar(time, windowed_data[RANGE_CORRECT_EDA], width=2, align="edge", edgecolor="black")
+
+
+def custom_resample(array_like):
+    return (array_like - array_like.max()).abs() / abs(array_like.max() - array_like.min())
+
+
+def generate_gsr_range_correct_means_plot_two_min(axes: plt.Axes, stimulus_data: pd.DataFrame):
+    """
+    Plots range corrected means over two minute windows.
+
+    :param axes: the axes to plot on
+    :param stimulus_data: the raw stimulus data
+    :return: None
+    """
+    plt.sca(axes)
+
+    windowed_data = stimulus_data.resample("2min").mean()[:15]
+    time = convert_date_to_time(windowed_data.index)
+
+    axes.set_title("Range-Corrected GSR Means Over Two-Minute Windows (Range Correct on Two-Min)")
+    axes.set_xlabel("Time (minutes)", fontsize="large")
+    axes.set_ylabel("Range-Corrected GSR (dimensionless)")
+    axes.set_ylim(0, 1)
+    set_windowed_x_axis(axes)
+    axes.bar(time, windowed_data["gsr_two_min"], width=2, align="edge", edgecolor="black", color="orange")
+
+
+def generate_gsr_max_min_plot(axes: plt.Axes, stimulus_data: pd.DataFrame):
+    """
+        My plot
+    """
+    plt.sca(axes)
+
+    windowed_data_max = stimulus_data.resample("2min").max()[:15]
+    windowed_data_min = stimulus_data.resample("2min").min()[:15]
+    time = convert_date_to_time(windowed_data_max.index)
+
+    axes.set_title("Range-Corrected GSR Maximums and Minimums Over Two-Minute Windows")
+    axes.set_xlabel("Time (minutes)", fontsize="large")
+    axes.set_ylabel("Range-Corrected GSR (dimensionless)")
+    axes.set_ylim(0, 1)
+    set_windowed_x_axis(axes)
+    axes.bar(time, windowed_data_max[RANGE_CORRECT_EDA], width=2, align="edge", edgecolor="black")
+    axes.bar(time, windowed_data_min[RANGE_CORRECT_EDA], width=2, align="edge", edgecolor="black")
 
 
 def generate_gsr_peaks_plot(axes: plt.Axes, stimulus_data: pd.DataFrame):
